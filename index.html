@@ -1,0 +1,208 @@
+-- STREAMING_CHUNK:Preparing Database Extensions & Cleanup...
+-- ==========================================
+-- 1. ฟังก์ชันช่วยและระบุวันเวลาการอัปเดต (Updated At Trigger)
+-- ==========================================
+CREATE OR REPLACE FUNCTION public.handle_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- STREAMING_CHUNK:Creating Admins Table & Auth Helper Function...
+-- ==========================================
+-- 2. ตารางผู้ดูแลระบบ (Admins) และฟังก์ชันตรวจสอบสิทธิ์
+-- ==========================================
+CREATE TABLE IF NOT EXISTS public.admins (
+    user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ฟังก์ชันสำหรับตรวจสอบว่าผู้ใช้ปัจจุบันเป็น Admin หรือไม่
+CREATE OR REPLACE FUNCTION public.is_admin()
+RETURNS BOOLEAN AS $$
+BEGIN
+    RETURN EXISTS (
+        SELECT 1 FROM public.admins
+        WHERE user_id = auth.uid()
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- STREAMING_CHUNK:Creating Shop Core Data Tables...
+-- ==========================================
+-- 3. ตารางข้อมูลร้านค้า (Shop Settings)
+-- ==========================================
+CREATE TABLE IF NOT EXISTS public.shop_settings (
+    id INT PRIMARY KEY DEFAULT 1 CONSTRAINT single_row_check CHECK (id = 1),
+    name TEXT NOT NULL DEFAULT 'MooJiw Angel',
+    cover_title TEXT DEFAULT 'Welcome Angel',
+    cover_subtitle TEXT DEFAULT 'ศูนย์รวมไอดีเกมมือถือ สินค้าดิจิทัล รหัสขาย รหัสเช่า บริการเติมเกม 24 ชม. ปลอดภัย 100%',
+    line_link TEXT DEFAULT 'https://line.me/R/ti/p/@moojiwangel',
+    line_id TEXT DEFAULT '@moojiwangel',
+    avatar_url TEXT DEFAULT 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- STREAMING_CHUNK:Creating Products Table...
+-- ==========================================
+-- 4. ตารางสินค้าดิจิทัลและไอดีเกม (Products)
+-- ==========================================
+CREATE TABLE IF NOT EXISTS public.products (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'ขายรหัส',
+    price NUMERIC(10, 2) NOT NULL DEFAULT 0,
+    promo_tag TEXT,
+    description TEXT,
+    img_url TEXT,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'sold', 'hidden')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- STREAMING_CHUNK:Creating Content Management Tables...
+-- ==========================================
+-- 5. ตารางโปรโมชั่น (Promotions)
+-- ==========================================
+CREATE TABLE IF NOT EXISTS public.promotions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- 6. ตารางคำถามที่พบบ่อย (FAQs)
+CREATE TABLE IF NOT EXISTS public.faqs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- 7. ตารางรีวิวจากลูกค้า (Reviews)
+CREATE TABLE IF NOT EXISTS public.reviews (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_name TEXT NOT NULL,
+    review_text TEXT NOT NULL,
+    rating INT DEFAULT 5 CHECK (rating BETWEEN 1 AND 5),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- STREAMING_CHUNK:Setting Up Automatic Timestamp Triggers...
+-- ==========================================
+-- 8. ติดตั้ง Triggers อัปเดต updated_at ทุกตาราง
+-- ==========================================
+DROP TRIGGER IF EXISTS set_updated_at_shop_settings ON public.shop_settings;
+CREATE TRIGGER set_updated_at_shop_settings BEFORE UPDATE ON public.shop_settings FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
+
+DROP TRIGGER IF EXISTS set_updated_at_products ON public.products;
+CREATE TRIGGER set_updated_at_products BEFORE UPDATE ON public.products FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
+
+DROP TRIGGER IF EXISTS set_updated_at_promotions ON public.promotions;
+CREATE TRIGGER set_updated_at_promotions BEFORE UPDATE ON public.promotions FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
+
+DROP TRIGGER IF EXISTS set_updated_at_faqs ON public.faqs;
+CREATE TRIGGER set_updated_at_faqs BEFORE UPDATE ON public.faqs FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
+
+DROP TRIGGER IF EXISTS set_updated_at_reviews ON public.reviews;
+CREATE TRIGGER set_updated_at_reviews BEFORE UPDATE ON public.reviews FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
+
+-- STREAMING_CHUNK:Enabling Row Level Security (RLS)...
+-- ==========================================
+-- 9. เปิดใช้งาน Row Level Security (RLS) ทุกตาราง
+-- ==========================================
+ALTER TABLE public.admins ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.shop_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.products ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.promotions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.faqs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.reviews ENABLE ROW LEVEL SECURITY;
+
+-- STREAMING_CHUNK:Applying RLS Policies...
+-- ==========================================
+-- 10. นโยบาย RLS (Policies)
+-- ==========================================
+
+-- Admins Policy: อ่านสิทธิ์ของตัวเองได้
+DROP POLICY IF EXISTS "Admins read self" ON public.admins;
+CREATE POLICY "Admins read self" ON public.admins FOR SELECT USING (auth.uid() = user_id);
+
+-- Shop Settings Policies: บุคคลทั่วไปอ่านได้ / เฉพาะแอนมินจัดการได้
+DROP POLICY IF EXISTS "Public view shop settings" ON public.shop_settings;
+CREATE POLICY "Public view shop settings" ON public.shop_settings FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Admins manage shop settings" ON public.shop_settings;
+CREATE POLICY "Admins manage shop settings" ON public.shop_settings FOR ALL USING (public.is_admin());
+
+-- Products Policies: บุคคลทั่วไปอ่านรายการที่ไม่ hidden / เฉพาะแอดมินจัดการได้ทั้งหมด
+DROP POLICY IF EXISTS "Public view active products" ON public.products;
+CREATE POLICY "Public view active products" ON public.products FOR SELECT USING (status != 'hidden' OR public.is_admin());
+
+DROP POLICY IF EXISTS "Admins manage products" ON public.products;
+CREATE POLICY "Admins manage products" ON public.products FOR ALL USING (public.is_admin());
+
+-- Promotions Policies: บุคคลทั่วไปอ่านได้ / เฉพาะแอดมินจัดการได้
+DROP POLICY IF EXISTS "Public view promotions" ON public.promotions;
+CREATE POLICY "Public view promotions" ON public.promotions FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Admins manage promotions" ON public.promotions;
+CREATE POLICY "Admins manage promotions" ON public.promotions FOR ALL USING (public.is_admin());
+
+-- FAQs Policies: บุคคลทั่วไปอ่านได้ / เฉพาะแอดมินจัดการได้
+DROP POLICY IF EXISTS "Public view faqs" ON public.faqs;
+CREATE POLICY "Public view faqs" ON public.faqs FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Admins manage faqs" ON public.faqs;
+CREATE POLICY "Admins manage faqs" ON public.faqs FOR ALL USING (public.is_admin());
+
+-- Reviews Policies: บุคคลทั่วไปอ่านได้ / เฉพาะแอดมินจัดการได้
+DROP POLICY IF EXISTS "Public view reviews" ON public.reviews;
+CREATE POLICY "Public view reviews" ON public.reviews FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "Admins manage reviews" ON public.reviews;
+CREATE POLICY "Admins manage reviews" ON public.reviews FOR ALL USING (public.is_admin());
+
+-- STREAMING_CHUNK:Inserting Initial Seed Data...
+-- ==========================================
+-- 11. ข้อมูลเริ่มต้น (Seed Data)
+-- ==========================================
+INSERT INTO public.shop_settings (id, name, cover_title, cover_subtitle, line_link, line_id, avatar_url)
+VALUES (
+    1,
+    'MooJiw Angel',
+    'Welcome Angel',
+    'ศูนย์รวมไอดีเกมมือถือ สินค้าดิจิทัล รหัสขาย รหัสเช่า บริการเติมเกม 24 ชม. ปลอดภัย 100%',
+    'https://line.me/R/ti/p/@moojiwangel',
+    '@moojiwangel',
+    'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80'
+) ON CONFLICT (id) DO NOTHING;
+
+-- STREAMING_CHUNK:Inserting Admin Seed Data...
+INSERT INTO public.admins (user_id)
+VALUES ('0c0ba50c-d9cd-44e6-84a9-383ffd1d1124')
+ON CONFLICT (user_id) DO NOTHING;
+
+INSERT INTO public.promotions (content) VALUES
+('🔥 ซื้อรหัสครบ 300.- แถมฟรีบัตรส่วนลด 5%'),
+('✨ รหัสเช่า ROV สกินพรีเมียมเริ่มต้นเพียง 20.- /วัน'),
+('🎉 เติมเกมผ่าน LINE OA รับโบนัสแต้มสะสม x2');
+
+INSERT INTO public.faqs (question, answer) VALUES
+('สั่งซื้อรหัสแล้วได้สินค้ายังไง?', 'ระบบจะส่งรหัสผ่านและข้อมูลไอดีเข้าสู่ LINE OA ของคุณทันทีหลังแจ้งชำระเงิน'),
+('รหัสเกมมีการรับประกันไหม?', 'รับประกันไอดีสะอาด ไม่โดนดึงคืน 100% มีทีมงานดูแลหลังการขาย'),
+('ชำระเงินช่องทางไหนได้บ้าง?', 'รองรับการโอนผ่านธนาคารไทยทุกแห่ง และ TrueMoney Wallet');
+
+INSERT INTO public.reviews (customer_name, review_text, rating) VALUES
+('คุณกิ๊ฟท์', 'ได้รับรหัสไวมากค่ะ แม่ค้าพูดจาน่ารัก ไอดีสะอาดเล่นได้ปกติเลย ❤️', 5),
+('คุณเบสท์', 'เช่าไอดีไปลงแรงค์วันเดียว คุ้มมากครับ ไว้มาเช่าอีกแน่นอน 👍', 5);
+
+INSERT INTO public.products (title, category, price, promo_tag, description, img_url, status) VALUES
+('ไอดี ROV รวงสกินระดับ SS + ฮีโร่ครบ 110 ตัว', 'ขายรหัส', 890, 'แนะนำ 🔥', 'ไอดีสะอาด เชื่อม Garena สามารถเปลี่ยนเบอร์และอีเมลได้ทันที สกินครบเซ็ตพร้อมลงแรงค์', 'https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=500&q=80', 'active'),
+('เช่าไอดี Valorant Rank Radiant สกินครบ (24 ชม)', 'รหัสเช่า', 50, 'เช่ารายวัน', 'ไอดีเช่ารายวัน มีสกิน Kuronami, Reaver, Prime พร้อมเล่นทันที ห้ามนำไปใช้วิธีโกงเด็ดขาด', 'https://images.unsplash.com/photo-1550745165-9bc0b252726f?auto=format&fit=crop&w=500&q=80', 'active'),
+('เติมเกม Free Fire 1,000 ไดมอนด์ (ผ่าน UID)', 'เติมเกม', 290, 'เข้าไวใน 3 นาที', 'บริการเติมเพชร Free Fire ใช้เพียง UID ไม่ต้องใช้รหัสผ่าน ปลอดภัยแน่นอน 100%', 'https://images.unsplash.com/photo-1538481199705-c710c4e965fc?auto=format&fit=crop&w=500&q=80', 'active'),
+('ชุด Presets โทนแต่งรูป Pastel Lightroom (.dng)', 'ไฟล์ดิจิทัล', 99, 'ดาวน์โหลดทันที', 'ไฟล์พรีเซ็ตแต่งรูปโทนชมพูพาสเทลเกาหลี 15 สไตล์ สำหรับใช้งานในแอป Lightroom Mobile/PC', 'https://images.unsplash.com/photo-1513542789411-b6a5d4f31634?auto=format&fit=crop&w=500&q=80', 'active');
